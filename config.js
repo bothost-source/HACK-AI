@@ -34,7 +34,7 @@ module.exports = {
   forceJoin: true,
   requiredChannels: [
     { username: '@lonerterritorybackagain', name: '🔴 Channel 1', url: 'https://t.me/lonerterritorybackagain' },
-    { username: '@devil_shop_hack', name: '🔴 Channel 2', url: 'https://t.me/devil_shop_hack' }
+    { username: '@Tarrificcrasher', name: '🔴 Channel 2', url: 'https://t.me/Tarrificcrasher' }
   ],
   requiredGroups: [
     { username: '@lonerisback', name: '🔵 Group', url: 'https://t.me/lonerisback' }
