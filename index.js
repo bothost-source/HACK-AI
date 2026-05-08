@@ -566,7 +566,7 @@ bot.onText(/\/hack (.+)/, async (msg, match) => {
       replyText += `\n\n📚 <b>Sources:</b> ${sources.join(', ')}`;
     }
 
-    bot.sendMessage(chatId, replyText, { parse_mode: 'HTML' });
+    await sendResponseWithImages(chatId, replyText, topic);
   } catch (error) {
     await bot.deleteMessage(chatId, thinkingMsg.message_id);
     bot.sendMessage(chatId, `❌ <b>Error:</b> ${error.message}`, { parse_mode: 'HTML' });
@@ -595,7 +595,7 @@ bot.onText(/\/chat (.+)/, async (msg, match) => {
     const response = await ai.chat(message);
     await bot.deleteMessage(chatId, thinkingMsg.message_id);
     // FIX: Use HTML to avoid Markdown parse errors
-    bot.sendMessage(chatId, response, { parse_mode: 'HTML' });
+    await sendResponseWithImages(chatId, response, message);
   } catch (error) {
     await bot.deleteMessage(chatId, thinkingMsg.message_id);
     bot.sendMessage(chatId, `❌ <b>Error:</b> ${error.message}`, { parse_mode: 'HTML' });
