@@ -1,0 +1,24 @@
+{
+  "name": "hacking-ai-bot",
+  "version": "1.0.0",
+  "description": "AI-powered hacking/cybersecurity Telegram bot with PDF knowledge base",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "build-kb": "node scripts/buildKnowledgeBase.js"
+  },
+  "keywords": ["telegram", "bot", "ai", "hacking", "cybersecurity"],
+  "author": "TARRIFIC",
+  "license": "MIT",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0",
+    "@google/generative-ai": "^0.21.0",
+    "pdf-parse": "^1.1.1",
+    "dotenv": "^16.4.5",
+    "natural": "^8.0.1",
+    "node-cron": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
