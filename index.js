@@ -162,6 +162,80 @@ if (!kbLoaded) {
 console.log('\n✅ Bot is ready!');
 console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
+// ============ IMAGE GENERATION HELPER ============
+function wantsImages(text) {
+  const imageKeywords = [
+    'with images', 'with image', 'show me', 'show image', 'show images',
+    'generate image', 'create image', 'draw', 'picture of', 'photo of',
+    'visual', 'diagram', 'illustration', 'infographic', 'chart'
+  ];
+  const lowerText = text.toLowerCase();
+  return imageKeywords.some(keyword => lowerText.includes(keyword));
+}
+
+function extractImagePrompts(topic, text, maxImages = 3) {
+  const basePrompt = `${topic}, detailed, high quality, professional, realistic`;
+  const lines = text.split('\n').filter(line => line.trim().length > 10);
+  const prompts = [];
+  for (let i = 0; i < Math.min(lines.length, maxImages); i++) {
+    if (lines[i].includes(':') || lines[i].includes('-') || lines[i].includes('•')) {
+      const cleanLine = lines[i].replace(/[^\w\s]/g, '').trim().substring(0, 100);
+      if (cleanLine.length > 5) prompts.push(`${cleanLine}, ${basePrompt}`);
+    }
+  }
+  if (prompts.length === 0) {
+    prompts.push(`${topic}, detailed infographic, professional design`);
+    prompts.push(`${topic}, realistic photograph, high quality`);
+  }
+  return prompts.slice(0, maxImages);
+}
+
+function generateImage(prompt) {
+  const encodedPrompt = encodeURIComponent(prompt);
+  return `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 100000)}`;
+}
+
+async function sendResponseWithImages(chatId, text, topic, msgIdToEdit = null) {
+  try {
+    const shouldGenerateImages = wantsImages(text) || topic.toLowerCase().includes('image');
+    if (!shouldGenerateImages) {
+      if (msgIdToEdit) {
+        await bot.editMessageText(text, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown' });
+      } else {
+        await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+      }
+      return;
+    }
+    const statusMsg = msgIdToEdit 
+      ? { message_id: msgIdToEdit, chat: { id: chatId } }
+      : await bot.sendMessage(chatId, '🎨 Generating response with images...');
+    const imagePrompts = extractImagePrompts(topic, text, 3);
+    const imageUrls = [];
+    for (const prompt of imagePrompts) {
+      imageUrls.push({ url: generateImage(prompt), prompt });
+    }
+    await bot.editMessageText(
+      `${text}\n\n🎨 *Generating ${imageUrls.length} images...*`,
+      { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
+    );
+    for (let i = 0; i < imageUrls.length; i++) {
+      const { url } = imageUrls[i];
+      try {
+        await bot.sendPhoto(chatId, url, {
+          caption: i === 0 ? `🎨 *Visual ${i + 1} of ${imageUrls.length}*\n📌 Related to: "${topic}"` : `🎨 *Visual ${i + 1} of ${imageUrls.length}*`,
+          parse_mode: 'Markdown'
+        });
+        if (i < imageUrls.length - 1) await new Promise(r => setTimeout(r, 1500));
+      } catch (imgError) {
+        console.error(`Failed to send image ${i + 1}:`, imgError.message);
+      }
+    }
+  } catch (error) {
+    console.error('Error in sendResponseWithImages:', error);
+    await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+  }
+}
+
 // ============== FORCE JOIN CHECK ==============
 
 async function checkUserMembership(userId) {
