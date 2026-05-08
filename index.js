@@ -10,7 +10,9 @@ const PDFProcessor = require('./pdfProcessor');
 const KnowledgeBase = require('./knowledgeBase');
 const AIEngine = require('./aiEngine');
 const StatsManager = require('./stats');
-
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 // Check required config
 if (!config.token) {
   console.error('❌ TELEGRAM_BOT_TOKEN is required!');
@@ -24,6 +26,125 @@ const pdfProcessor = new PDFProcessor();
 const kb = new KnowledgeBase();
 const ai = new AIEngine();
 const stats = new StatsManager();
+
+// PDF Upload Handler with Security Features
+bot.on('document', async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const username = msg.from.username || 'unknown';
+
+  // 1. OWNER ONLY CHECK
+  if (userId.toString() !== config.ownerId) {
+    console.log(`⛔ Rejected PDF upload from non-owner: ${userId} (@${username})`);
+    return bot.sendMessage(chatId, '❌ Only the bot owner can upload PDFs.\n\n👑 Owner: @TARRIFIC');
+  }
+
+  const fileName = msg.document.file_name;
+  const fileSize = msg.document.file_size; // in bytes
+
+  // 2. PDF EXTENSION CHECK
+  if (!fileName.toLowerCase().endsWith('.pdf')) {
+    return bot.sendMessage(chatId, '❌ Only PDF files (.pdf) are allowed.');
+  }
+
+  // 3. FILE SIZE LIMIT (50 MB max)
+  const MAX_SIZE = 50 * 1024 * 1024; // 50MB
+  if (fileSize > MAX_SIZE) {
+    return bot.sendMessage(chatId, `❌ File too large!\n\n📊 Size: ${(fileSize / 1024 / 1024).toFixed(2)} MB\n📏 Max allowed: 50 MB`);
+  }
+
+  // 4. DUPLICATE DETECTION
+  const filePath = path.join(config.pdfsDir, fileName);
+  
+  if (fs.existsSync(filePath)) {
+    // Check if content is actually different by comparing file size
+    const existingSize = fs.statSync(filePath).size;
+    
+    if (existingSize === fileSize) {
+      return bot.sendMessage(chatId, `⚠️ PDF "${fileName}" already exists with same size.\n\nUse /reload if you want to refresh the knowledge base.`);
+    }
+    
+    // Same name but different size — rename with timestamp
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const newName = `${path.parse(fileName).name}_${timestamp}.pdf`;
+    const newPath = path.join(config.pdfsDir, newName);
+    
+    await downloadAndSave(msg.document, newPath, chatId, newName, true);
+    return;
+  }
+
+  // 5. DOWNLOAD AND SAVE
+  await downloadAndSave(msg.document, filePath, chatId, fileName, false);
+});
+
+// Helper function to download and save PDF
+async function downloadAndSave(document, filePath, chatId, displayName, isRenamed) {
+  try {
+    // Send "uploading" status
+    const statusMsg = await bot.sendMessage(chatId, `⏳ Downloading "${displayName}"...`);
+
+    // Get file link from Telegram
+    const fileLink = await bot.getFileLink(document.file_id);
+    
+    // Download file
+    const response = await fetch(fileLink);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    
+    const buffer = await response.arrayBuffer();
+    
+    // 6. VERIFY IT'S ACTUALLY A PDF (magic number check)
+    const header = Buffer.from(buffer.slice(0, 5));
+    if (header.toString() !== '%PDF-') {
+      throw new Error('File is not a valid PDF (invalid header)');
+    }
+
+    // Ensure pdfs directory exists
+    if (!fs.existsSync(config.pdfsDir)) {
+      fs.mkdirSync(config.pdfsDir, { recursive: true });
+    }
+
+    // Save file
+    fs.writeFileSync(filePath, Buffer.from(buffer));
+    
+    // 7. CALCULATE FILE HASH for integrity
+    const hash = crypto.createHash('md5').update(Buffer.from(buffer)).digest('hex').substring(0, 8);
+
+    // 8. AUTO-RELOAD KNOWLEDGE BASE
+    let reloadStatus = '';
+    try {
+      const kb = new (require('./knowledgeBase'))();
+      const loaded = await kb.load();
+      reloadStatus = loaded 
+        ? '\n\n🔄 Knowledge base auto-reloaded successfully!' 
+        : '\n\n⚠️ Knowledge base reload failed. Use /reload manually.';
+    } catch (reloadError) {
+      reloadStatus = '\n\n⚠️ Auto-reload error. Use /reload manually.';
+      console.error('Auto-reload error:', reloadError.message);
+    }
+
+    // 9. SUCCESS MESSAGE
+    const fileSizeMB = (fs.statSync(filePath).size / 1024 / 1024).toFixed(2);
+    const renameNote = isRenamed ? '\n\n📝 Note: File was renamed to avoid conflict.' : '';
+    
+    await bot.editMessageText(
+      `✅ PDF uploaded successfully!\n\n` +
+      `📄 Name: ${displayName}\n` +
+      `📊 Size: ${fileSizeMB} MB\n` +
+      `🔐 Hash: ${hash}\n` +
+      `📁 Saved to: pdfs/\n` +
+      `👤 By: Owner` +
+      reloadStatus +
+      renameNote,
+      { chat_id: chatId, message_id: statusMsg.message_id }
+    );
+
+    console.log(`📥 PDF uploaded: ${displayName} (${fileSizeMB} MB) by owner`);
+
+  } catch (error) {
+    console.error('PDF upload error:', error);
+    bot.sendMessage(chatId, `❌ Failed to upload PDF:\n\n${error.message}\n\nPlease try again.`);
+  }
+}
 
 // Track users who passed force join check
 const verifiedUsers = new Set();
