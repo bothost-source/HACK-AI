@@ -13,6 +13,7 @@ const StatsManager = require('./stats');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+
 // Check required config
 if (!config.token) {
   console.error('❌ TELEGRAM_BOT_TOKEN is required!');
@@ -27,7 +28,10 @@ const kb = new KnowledgeBase();
 const ai = new AIEngine();
 const stats = new StatsManager();
 
-// PDF Upload Handler with Security Features
+// Track users who passed force join check
+const verifiedUsers = new Set();
+
+// ============ PDF UPLOAD HANDLER (FIXED) ============
 bot.on('document', async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -109,10 +113,10 @@ async function downloadAndSave(document, filePath, chatId, displayName, isRename
     // 7. CALCULATE FILE HASH for integrity
     const hash = crypto.createHash('md5').update(Buffer.from(buffer)).digest('hex').substring(0, 8);
 
-    // 8. AUTO-RELOAD KNOWLEDGE BASE
+    // 8. AUTO-RELOAD KNOWLEDGE BASE (FIXED - use existing kb instance!)
     let reloadStatus = '';
     try {
-      const kb = new (require('./knowledgeBase'))();
+      // FIX: Use the existing kb instance instead of creating a new one
       const loaded = await kb.load();
       reloadStatus = loaded 
         ? '\n\n🔄 Knowledge base auto-reloaded successfully!' 
@@ -145,22 +149,6 @@ async function downloadAndSave(document, filePath, chatId, displayName, isRename
     bot.sendMessage(chatId, `❌ Failed to upload PDF:\n\n${error.message}\n\nPlease try again.`);
   }
 }
-
-// Track users who passed force join check
-const verifiedUsers = new Set();
-
-// Load knowledge base on startup
-console.log('\n🚀 Starting ' + config.botName + '...');
-console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-const kbLoaded = kb.load();
-if (!kbLoaded) {
-  console.log('\n⚠️ No knowledge base found.');
-  console.log('   Upload PDFs to the pdfs/ folder and use /reload');
-}
-
-console.log('\n✅ Bot is ready!');
-console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
 // ============ IMAGE GENERATION HELPER ============
 function wantsImages(text) {
@@ -795,9 +783,17 @@ bot.onText(/\/ping/, async (msg) => {
   });
 });
 
-// ============== KEYBOARD BUTTON HANDLERS ==============
+// ============== KEYBOARD BUTTON HANDLERS (FIXED) ==============
+
+// FIX: Process document messages FIRST and return early so they don't hit the message handler
+// The 'document' handler above already handles this, but we need to make sure the 'message' 
+// handler ignores document messages properly.
 
 bot.on('message', async (msg) => {
+  // FIX: Ignore messages that contain documents (PDFs, etc.) - they are handled by bot.on('document')
+  if (msg.document) return;
+  
+  // FIX: Also ignore messages that are commands (start with /)
   if (!msg.text || msg.text.startsWith('/')) return;
 
   const chatId = msg.chat.id;
@@ -1077,5 +1073,18 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (err) => {
   console.error('Unhandled Rejection:', err.message);
 });
+
+// Load knowledge base on startup
+console.log('\n🚀 Starting ' + config.botName + '...');
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+const kbLoaded = kb.load();
+if (!kbLoaded) {
+  console.log('\n⚠️ No knowledge base found.');
+  console.log('   Upload PDFs to the pdfs/ folder and use /reload');
+}
+
+console.log('\n✅ Bot is ready!');
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
 console.log('\n🤖 Bot is running and listening for messages...\n');
