@@ -1,7 +1,7 @@
 /**
  * Hacking AI Bot - Main Entry Point
  * Powered by Google Gemini + PDF Knowledge Base
- * Features: Force Join, Keyboard Buttons, Colored UI
+ * Features: Force Join, Keyboard Buttons, Colored UI, Interactive Teaching
  */
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -13,6 +13,7 @@ const StatsManager = require('./stats');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const https = require('https');
 
 // Check required config
 if (!config.token) {
@@ -31,92 +32,118 @@ const stats = new StatsManager();
 // Track users who passed force join check
 const verifiedUsers = new Set();
 
-// ============ PDF UPLOAD HANDLER (FIXED) ============
+// Conversation memory for /ask
+const userConversations = new Map();
+
+// ============ HELPER: Download file using https (reliable) ============
+function downloadFile(url, destPath) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(destPath);
+    https.get(url, (response) => {
+      if (response.statusCode !== 200) {
+        reject(new Error(`HTTP ${response.statusCode}`));
+        return;
+      }
+      response.pipe(file);
+      file.on('finish', () => {
+        file.close(resolve);
+      });
+    }).on('error', (err) => {
+      fs.unlink(destPath, () => {});
+      reject(err);
+    });
+  });
+}
+
+// ============ PDF UPLOAD HANDLER (COMPLETELY REWRITTEN) ============
 bot.on('document', async (msg) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  const username = msg.from.username || 'unknown';
+  try {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const username = msg.from.username || 'unknown';
 
-  // 1. OWNER ONLY CHECK
-  if (userId.toString() !== config.ownerId) {
-    console.log(`⛔ Rejected PDF upload from non-owner: ${userId} (@${username})`);
-    return bot.sendMessage(chatId, '❌ Only the bot owner can upload PDFs.\n\n👑 Owner: @TARRIFIC');
-  }
+    console.log(`📄 Document received from ${userId} (@${username}): ${msg.document.file_name}`);
 
-  const fileName = msg.document.file_name;
-  const fileSize = msg.document.file_size; // in bytes
-
-  // 2. PDF EXTENSION CHECK
-  if (!fileName.toLowerCase().endsWith('.pdf')) {
-    return bot.sendMessage(chatId, '❌ Only PDF files (.pdf) are allowed.');
-  }
-
-  // 3. FILE SIZE LIMIT (50 MB max)
-  const MAX_SIZE = 50 * 1024 * 1024; // 50MB
-  if (fileSize > MAX_SIZE) {
-    return bot.sendMessage(chatId, `❌ File too large!\n\n📊 Size: ${(fileSize / 1024 / 1024).toFixed(2)} MB\n📏 Max allowed: 50 MB`);
-  }
-
-  // 4. DUPLICATE DETECTION
-  const filePath = path.join(config.pdfsDir, fileName);
-  
-  if (fs.existsSync(filePath)) {
-    // Check if content is actually different by comparing file size
-    const existingSize = fs.statSync(filePath).size;
-    
-    if (existingSize === fileSize) {
-      return bot.sendMessage(chatId, `⚠️ PDF "${fileName}" already exists with same size.\n\nUse /reload if you want to refresh the knowledge base.`);
+    // 1. OWNER ONLY CHECK
+    if (userId.toString() !== config.ownerId) {
+      console.log(`⛔ Rejected PDF upload from non-owner: ${userId} (@${username})`);
+      return bot.sendMessage(chatId, '❌ Only the bot owner can upload PDFs.\n\n👑 Owner: @TARRIFIC');
     }
-    
-    // Same name but different size — rename with timestamp
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const newName = `${path.parse(fileName).name}_${timestamp}.pdf`;
-    const newPath = path.join(config.pdfsDir, newName);
-    
-    await downloadAndSave(msg.document, newPath, chatId, newName, true);
-    return;
-  }
 
-  // 5. DOWNLOAD AND SAVE
-  await downloadAndSave(msg.document, filePath, chatId, fileName, false);
+    const fileName = msg.document.file_name;
+    const fileSize = msg.document.file_size;
+
+    // 2. PDF EXTENSION CHECK
+    if (!fileName.toLowerCase().endsWith('.pdf')) {
+      return bot.sendMessage(chatId, '❌ Only PDF files (.pdf) are allowed.');
+    }
+
+    // 3. FILE SIZE LIMIT (50 MB max)
+    const MAX_SIZE = 50 * 1024 * 1024;
+    if (fileSize > MAX_SIZE) {
+      return bot.sendMessage(chatId, `❌ File too large!\n\n📊 Size: ${(fileSize / 1024 / 1024).toFixed(2)} MB\n📏 Max allowed: 50 MB`);
+    }
+
+    // 4. DUPLICATE DETECTION
+    const filePath = path.join(config.pdfsDir, fileName);
+    
+    if (fs.existsSync(filePath)) {
+      const existingSize = fs.statSync(filePath).size;
+      
+      if (existingSize === fileSize) {
+        return bot.sendMessage(chatId, `⚠️ PDF "${fileName}" already exists with same size.\n\nUse /reload if you want to refresh the knowledge base.`);
+      }
+      
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const newName = `${path.parse(fileName).name}_${timestamp}.pdf`;
+      const newPath = path.join(config.pdfsDir, newName);
+      
+      await downloadAndSave(msg.document, newPath, chatId, newName, true);
+      return;
+    }
+
+    // 5. DOWNLOAD AND SAVE
+    await downloadAndSave(msg.document, filePath, chatId, fileName, false);
+
+  } catch (error) {
+    console.error('❌ CRITICAL ERROR in document handler:', error);
+    try {
+      await bot.sendMessage(msg.chat.id, `❌ Upload failed: ${error.message}`);
+    } catch (e) {
+      console.error('Failed to send error message:', e.message);
+    }
+  }
 });
 
 // Helper function to download and save PDF
 async function downloadAndSave(document, filePath, chatId, displayName, isRenamed) {
   try {
-    // Send "uploading" status
     const statusMsg = await bot.sendMessage(chatId, `⏳ Downloading "${displayName}"...`);
 
-    // Get file link from Telegram
     const fileLink = await bot.getFileLink(document.file_id);
+    console.log(`🔗 File link obtained: ${fileLink}`);
+
+    if (!fs.existsSync(config.pdfsDir)) {
+      fs.mkdirSync(config.pdfsDir, { recursive: true });
+      console.log(`📁 Created directory: ${config.pdfsDir}`);
+    }
+
+    console.log(`⬇️ Downloading to: ${filePath}`);
+    await downloadFile(fileLink, filePath);
+    console.log(`✅ Download complete: ${filePath}`);
+
+    const buffer = fs.readFileSync(filePath);
     
-    // Download file
-    const response = await fetch(fileLink);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    
-    const buffer = await response.arrayBuffer();
-    
-    // 6. VERIFY IT'S ACTUALLY A PDF (magic number check)
-    const header = Buffer.from(buffer.slice(0, 5));
-    if (header.toString() !== '%PDF-') {
+    const header = buffer.slice(0, 5).toString();
+    if (header !== '%PDF-') {
+      fs.unlinkSync(filePath);
       throw new Error('File is not a valid PDF (invalid header)');
     }
 
-    // Ensure pdfs directory exists
-    if (!fs.existsSync(config.pdfsDir)) {
-      fs.mkdirSync(config.pdfsDir, { recursive: true });
-    }
+    const hash = crypto.createHash('md5').update(buffer).digest('hex').substring(0, 8);
 
-    // Save file
-    fs.writeFileSync(filePath, Buffer.from(buffer));
-    
-    // 7. CALCULATE FILE HASH for integrity
-    const hash = crypto.createHash('md5').update(Buffer.from(buffer)).digest('hex').substring(0, 8);
-
-    // 8. AUTO-RELOAD KNOWLEDGE BASE (FIXED - use existing kb instance!)
     let reloadStatus = '';
     try {
-      // FIX: Use the existing kb instance instead of creating a new one
       const loaded = await kb.load();
       reloadStatus = loaded 
         ? '\n\n🔄 Knowledge base auto-reloaded successfully!' 
@@ -126,7 +153,6 @@ async function downloadAndSave(document, filePath, chatId, displayName, isRename
       console.error('Auto-reload error:', reloadError.message);
     }
 
-    // 9. SUCCESS MESSAGE
     const fileSizeMB = (fs.statSync(filePath).size / 1024 / 1024).toFixed(2);
     const renameNote = isRenamed ? '\n\n📝 Note: File was renamed to avoid conflict.' : '';
     
@@ -188,9 +214,9 @@ async function sendResponseWithImages(chatId, text, topic, msgIdToEdit = null) {
     const shouldGenerateImages = wantsImages(text) || topic.toLowerCase().includes('image');
     if (!shouldGenerateImages) {
       if (msgIdToEdit) {
-        await bot.editMessageText(text, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'Markdown' });
+        await bot.editMessageText(text, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML' });
       } else {
-        await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
       }
       return;
     }
@@ -203,15 +229,15 @@ async function sendResponseWithImages(chatId, text, topic, msgIdToEdit = null) {
       imageUrls.push({ url: generateImage(prompt), prompt });
     }
     await bot.editMessageText(
-      `${text}\n\n🎨 *Generating ${imageUrls.length} images...*`,
-      { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
+      `${text}\n\n🎨 <b>Generating ${imageUrls.length} images...</b>`,
+      { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' }
     );
     for (let i = 0; i < imageUrls.length; i++) {
       const { url } = imageUrls[i];
       try {
         await bot.sendPhoto(chatId, url, {
-          caption: i === 0 ? `🎨 *Visual ${i + 1} of ${imageUrls.length}*\n📌 Related to: "${topic}"` : `🎨 *Visual ${i + 1} of ${imageUrls.length}*`,
-          parse_mode: 'Markdown'
+          caption: i === 0 ? `🎨 <b>Visual ${i + 1} of ${imageUrls.length}</b>\n📌 Related to: "${topic}"` : `🎨 <b>Visual ${i + 1} of ${imageUrls.length}</b>`,
+          parse_mode: 'HTML'
         });
         if (i < imageUrls.length - 1) await new Promise(r => setTimeout(r, 1500));
       } catch (imgError) {
@@ -220,7 +246,7 @@ async function sendResponseWithImages(chatId, text, topic, msgIdToEdit = null) {
     }
   } catch (error) {
     console.error('Error in sendResponseWithImages:', error);
-    await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
   }
 }
 
@@ -330,8 +356,6 @@ function getOwnerKeyboard() {
 }
 
 // ============== COLOR FORMATTING (Telegram-safe) ==============
-// Telegram HTML only supports: <b>, <i>, <u>, <s>, <code>, <pre>, <a>, <tg-spoiler>
-// NO style attributes allowed. We use emoji indicators instead.
 
 const colors = {
   red: (text) => `🔴 <b>${text}</b>`,
@@ -354,7 +378,6 @@ bot.onText(/\/start/, async (msg) => {
   stats.trackUser(userId, msg.from.username, firstName);
   stats.trackCommand('start');
 
-  // Check force join
   const isMember = await checkUserMembership(userId);
   if (!isMember) {
     return bot.sendMessage(chatId, getForceJoinText(firstName), {
@@ -416,9 +439,9 @@ bot.onText(/\/help/, async (msg) => {
 ╚══════════════════════════════════╝
 
 🔴 <b>🔍 Query Commands:</b>
-<code>/ask &lt;question&gt;</code> - Ask AI with knowledge base
+<code>/ask &lt;question&gt;</code> - Ask AI with knowledge base (interactive)
 <code>/search &lt;query&gt;</code> - Search PDF knowledge base
-<code>/hack &lt;topic&gt;</code> - Get hacking/cybersec info
+<code>/hack &lt;topic&gt;</code> - Get interactive hacking guide
 <code>/chat &lt;message&gt;</code> - Free chat with AI
 
 🔵 <b>📚 Knowledge Base:</b>
@@ -437,13 +460,13 @@ bot.onText(/\/help/, async (msg) => {
 
 🟠 <b>💡 Example:</b>
 <code>/ask What is SQL injection?</code>
-<code>/hack How to secure a WiFi network?</code>
+<code>/hack How to add security to your device</code>
   `;
 
   bot.sendMessage(chatId, helpText, { parse_mode: 'HTML' });
 });
 
-// /ask - Ask with knowledge base
+// /ask - Conversational AI with memory (REWRITTEN)
 bot.onText(/\/ask (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -463,8 +486,35 @@ bot.onText(/\/ask (.+)/, async (msg, match) => {
   const thinkingMsg = await bot.sendMessage(chatId, '🧠 <b>Thinking...</b>', { parse_mode: 'HTML' });
 
   try {
+    const history = userConversations.get(userId) || [];
     const { context, sources, found } = kb.getContext(query);
-    const response = await ai.generateResponse(query, context);
+    
+    const conversationPrompt = `
+You are a cybersecurity mentor. Answer the user's question conversationally.
+
+Previous conversation:
+${history.slice(-3).map(h => `User: ${h.user}\nYou: ${h.bot}`).join('\n')}
+
+${found ? `Relevant knowledge base context:\n${context}\n\n` : ''}
+
+User's new question: "${query}"
+
+Instructions:
+- Answer directly and practically
+- If explaining a process, give numbered steps
+- Suggest tools or commands where relevant
+- If the user seems confused, simplify
+- Keep it conversational but informative
+- If you don't know, say so honestly
+
+Respond as if you're teaching a student 1-on-1.
+`;
+
+    const response = await ai.generateResponse(conversationPrompt, context || '');
+
+    history.push({ user: query, bot: response.text.substring(0, 200) });
+    if (history.length > 10) history.shift();
+    userConversations.set(userId, history);
 
     let replyText = response.text;
 
@@ -474,14 +524,30 @@ bot.onText(/\/ask (.+)/, async (msg, match) => {
 
     await bot.deleteMessage(chatId, thinkingMsg.message_id);
 
-    // FIX: Use HTML instead of Markdown to avoid parse errors from AI output
+    const helpKeyboard = {
+      inline_keyboard: [
+        [
+          { text: '✅ Helpful', callback_data: `helpful_${userId}` },
+          { text: '❌ Not Helpful', callback_data: `nothelpful_${userId}` }
+        ],
+        [
+          { text: '🔍 Explain More', callback_data: `explain_${query}` },
+          { text: '🛠️ Show Example', callback_data: `example_${query}` }
+        ]
+      ]
+    };
+
     if (replyText.length > 4000) {
       const chunks = replyText.match(/[\s\S]{1,4000}/g) || [replyText];
-      for (const chunk of chunks) {
-        await bot.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
+      for (let i = 0; i < chunks.length; i++) {
+        if (i === chunks.length - 1) {
+          await bot.sendMessage(chatId, chunks[i], { parse_mode: 'HTML', reply_markup: helpKeyboard });
+        } else {
+          await bot.sendMessage(chatId, chunks[i], { parse_mode: 'HTML' });
+        }
       }
     } else {
-      await bot.sendMessage(chatId, replyText, { parse_mode: 'HTML' });
+      await bot.sendMessage(chatId, replyText, { parse_mode: 'HTML', reply_markup: helpKeyboard });
     }
 
   } catch (error) {
@@ -524,7 +590,7 @@ bot.onText(/\/search (.+)/, async (msg, match) => {
   bot.sendMessage(chatId, response, { parse_mode: 'HTML' });
 });
 
-// /hack - Quick hacking info
+// /hack - Interactive hacking guide (REWRITTEN)
 bot.onText(/\/hack (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -540,21 +606,67 @@ bot.onText(/\/hack (.+)/, async (msg, match) => {
 
   stats.trackCommand('hack');
 
-  const thinkingMsg = await bot.sendMessage(chatId, '🔓 <b>Loading hacking knowledge...</b>', { parse_mode: 'HTML' });
+  const thinkingMsg = await bot.sendMessage(chatId, '🔓 <b>Analyzing topic & building your guide...</b>', { parse_mode: 'HTML' });
 
   try {
-    const query = `Explain ${topic} in cybersecurity/hacking context. Include practical examples, tools, and prevention methods.`;
     const { context, sources, found } = kb.getContext(topic);
-    const response = await ai.generateResponse(query, context);
+    
+    const teachingPrompt = `
+You are an expert cybersecurity mentor. The user wants to learn: "${topic}"
+
+${found && context ? `Here is relevant knowledge from our database to base your answer on:\n${context}\n\n` : ''}
+
+Your task:
+1. **Understand** what the user wants to achieve
+2. **Explain the concept** in simple terms (like explaining to a beginner)
+3. **Provide a step-by-step actionable guide** they can follow RIGHT NOW
+4. **Include specific commands, tools, or settings** where applicable
+5. **Add safety warnings** about legal/ethical boundaries
+6. **Suggest what to do next** after completing the steps
+
+Format your response as:
+🔹 CONCEPT: Brief explanation
+🔹 TOOLS NEEDED: List what they need
+🔹 STEP-BY-STEP GUIDE:
+   Step 1: ...
+   Step 2: ...
+   Step 3: ...
+🔹 SAFETY WARNINGS: What NOT to do
+🔹 NEXT STEPS: Where to go from here
+
+Do NOT just copy from the knowledge base. Use it as reference, but explain and guide like a mentor would.
+`;
+
+    const response = await ai.generateResponse(teachingPrompt, context || '');
 
     await bot.deleteMessage(chatId, thinkingMsg.message_id);
 
-    let replyText = `🔓 <b>Hacking Topic:</b> 🔴 ${topic}\n\n${response.text}`;
+    let replyText = `🔓 <b>Hacking Guide: ${topic}</b>\n\n${response.text}`;
+    
     if (found && sources.length > 0) {
-      replyText += `\n\n📚 <b>Sources:</b> ${sources.join(', ')}`;
+      replyText += `\n\n📚 <b>Reference Sources:</b> ${sources.join(', ')}`;
     }
 
     await sendResponseWithImages(chatId, replyText, topic);
+
+    const followUpKeyboard = {
+      inline_keyboard: [
+        [
+          { text: '🔍 Deep Dive', callback_data: `deep_${topic}` },
+          { text: '🛠️ Show Commands', callback_data: `commands_${topic}` }
+        ],
+        [
+          { text: '⚠️ Common Mistakes', callback_data: `mistakes_${topic}` },
+          { text: '📋 Checklist', callback_data: `checklist_${topic}` }
+        ]
+      ]
+    };
+
+    await bot.sendMessage(chatId, 
+      `💡 <b>Want to go deeper?</b> Choose an option below or ask a follow-up question with <code>/ask</code>`, 
+      { parse_mode: 'HTML', reply_markup: followUpKeyboard }
+    );
+
   } catch (error) {
     await bot.deleteMessage(chatId, thinkingMsg.message_id);
     bot.sendMessage(chatId, `❌ <b>Error:</b> ${error.message}`, { parse_mode: 'HTML' });
@@ -582,7 +694,6 @@ bot.onText(/\/chat (.+)/, async (msg, match) => {
   try {
     const response = await ai.chat(message);
     await bot.deleteMessage(chatId, thinkingMsg.message_id);
-    // FIX: Use HTML to avoid Markdown parse errors
     await sendResponseWithImages(chatId, response, message);
   } catch (error) {
     await bot.deleteMessage(chatId, thinkingMsg.message_id);
@@ -783,24 +894,25 @@ bot.onText(/\/ping/, async (msg) => {
   });
 });
 
-// ============== KEYBOARD BUTTON HANDLERS (FIXED) ==============
-
-// FIX: Process document messages FIRST and return early so they don't hit the message handler
-// The 'document' handler above already handles this, but we need to make sure the 'message' 
-// handler ignores document messages properly.
+// ============== KEYBOARD BUTTON HANDLERS ==============
 
 bot.on('message', async (msg) => {
-  // FIX: Ignore messages that contain documents (PDFs, etc.) - they are handled by bot.on('document')
-  if (msg.document) return;
+  if (msg.document) {
+    console.log(`📄 Message handler skipping document: ${msg.document.file_name}`);
+    return;
+  }
   
-  // FIX: Also ignore messages that are commands (start with /)
-  if (!msg.text || msg.text.startsWith('/')) return;
+  if (!msg.text) {
+    console.log(`⚠️ Message handler skipping non-text message`);
+    return;
+  }
+  
+  if (msg.text.startsWith('/')) return;
 
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const text = msg.text;
 
-  // Check force join for all keyboard actions
   const isMember = await checkUserMembership(userId);
   if (!isMember) {
     return bot.sendMessage(chatId, getForceJoinText(msg.from.first_name), {
@@ -830,7 +942,7 @@ bot.on('message', async (msg) => {
 
     case '🔓 Hacking Info': {
       bot.sendMessage(chatId,
-        '🔴 <b>🔓 Get Hacking Info</b>\n\nType a topic like this:\n<code>/hack WiFi security</code>\n<code>/hack Metasploit basics</code>',
+        '🔴 <b>🔓 Get Hacking Info</b>\n\nType a topic like this:\n<code>/hack WiFi security</code>\n<code>/hack How to add security to your device</code>',
         { parse_mode: 'HTML' }
       );
       break;
@@ -871,9 +983,9 @@ bot.on('message', async (msg) => {
 ╚══════════════════════════════════╝
 
 🔴 <b>🔍 Query Commands:</b>
-<code>/ask &lt;question&gt;</code> - Ask AI with knowledge base
+<code>/ask &lt;question&gt;</code> - Ask AI with knowledge base (interactive)
 <code>/search &lt;query&gt;</code> - Search PDF knowledge base
-<code>/hack &lt;topic&gt;</code> - Get hacking/cybersec info
+<code>/hack &lt;topic&gt;</code> - Get interactive hacking guide
 <code>/chat &lt;message&gt;</code> - Free chat with AI
 
 🔵 <b>📚 Knowledge Base:</b>
@@ -964,13 +1076,88 @@ An AI-powered Telegram bot for hacking & cybersecurity knowledge.
   }
 });
 
-// ============== CALLBACK HANDLERS ==============
+// ============== CALLBACK HANDLERS (REWRITTEN WITH HACK FOLLOW-UPS) ==============
 
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const userId = query.from.id;
   const data = query.data;
 
+  // Handle hack follow-ups
+  if (data.startsWith('deep_') || data.startsWith('commands_') || data.startsWith('mistakes_') || data.startsWith('checklist_')) {
+    const [type, ...topicParts] = data.split('_');
+    const topic = topicParts.join('_');
+    
+    await bot.answerCallbackQuery(query.id, { text: '🔓 Generating...' });
+    
+    let prompt = '';
+    let title = '';
+    
+    switch(type) {
+      case 'deep':
+        title = `🔍 Deep Dive: ${topic}`;
+        prompt = `Provide an advanced, technical deep dive into "${topic}". Include internals, protocols, packet-level details, and advanced techniques. Assume the user knows basics.`;
+        break;
+      case 'commands':
+        title = `🛠️ Commands for: ${topic}`;
+        prompt = `List all specific terminal commands, tools, and exact syntax needed for "${topic}". Format as copy-paste ready commands with explanations. Include Linux/Windows variants where relevant.`;
+        break;
+      case 'mistakes':
+        title = `⚠️ Common Mistakes: ${topic}`;
+        prompt = `What are the most common mistakes beginners make when learning or attempting "${topic}"? For each mistake, explain why it's wrong and how to do it correctly.`;
+        break;
+      case 'checklist':
+        title = `📋 Checklist: ${topic}`;
+        prompt = `Create a practical checklist for "${topic}" that the user can follow step-by-step. Include [ ] checkboxes format, prerequisites, and verification steps for each item.`;
+        break;
+    }
+    
+    try {
+      const { context } = kb.getContext(topic);
+      const response = await ai.generateResponse(prompt, context || '');
+      
+      await bot.sendMessage(chatId, 
+        `<b>${title}</b>\n\n${response.text}`, 
+        { parse_mode: 'HTML' }
+      );
+    } catch (error) {
+      bot.sendMessage(chatId, `❌ Error: ${error.message}`, { parse_mode: 'HTML' });
+    }
+    return;
+  }
+
+  // Handle /ask follow-ups
+  if (data.startsWith('helpful_') || data.startsWith('nothelpful_') || data.startsWith('explain_') || data.startsWith('example_')) {
+    const [type, ...rest] = data.split('_');
+    const param = rest.join('_');
+    
+    await bot.answerCallbackQuery(query.id, { text: 'Processing...' });
+    
+    if (type === 'helpful') {
+      await bot.sendMessage(chatId, '✅ <b>Glad it helped!</b> Ask another question anytime.', { parse_mode: 'HTML' });
+    } else if (type === 'nothelpful') {
+      await bot.sendMessage(chatId, '❌ <b>Sorry about that.</b> Try rephrasing your question or use <code>/ask</code> with more details.', { parse_mode: 'HTML' });
+    } else if (type === 'explain') {
+      try {
+        const { context } = kb.getContext(param);
+        const response = await ai.generateResponse(`Explain "${param}" in much more detail. Break down every concept, use analogies, and ensure a beginner can fully understand.`, context || '');
+        await bot.sendMessage(chatId, `🔍 <b>Detailed Explanation: ${param}</b>\n\n${response.text}`, { parse_mode: 'HTML' });
+      } catch (error) {
+        bot.sendMessage(chatId, `❌ Error: ${error.message}`, { parse_mode: 'HTML' });
+      }
+    } else if (type === 'example') {
+      try {
+        const { context } = kb.getContext(param);
+        const response = await ai.generateResponse(`Provide a complete, practical, real-world example for "${param}". Include the scenario, step-by-step execution, expected output, and troubleshooting tips.`, context || '');
+        await bot.sendMessage(chatId, `🛠️ <b>Practical Example: ${param}</b>\n\n${response.text}`, { parse_mode: 'HTML' });
+      } catch (error) {
+        bot.sendMessage(chatId, `❌ Error: ${error.message}`, { parse_mode: 'HTML' });
+      }
+    }
+    return;
+  }
+
+  // Force join verification
   if (data === 'verify_join') {
     const allChannels = [...config.requiredChannels, ...config.requiredGroups];
     let allJoined = true;
